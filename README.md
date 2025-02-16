@@ -38,13 +38,13 @@
 Standard installation
 
 ```bash
-$ pip3 install video-to-ascii
+$ pip install video-to-ascii
 ```
 
 With audio support installation
 
 ```bash
-$ pip3 install video-to-ascii --install-option="--with-audio"
+$ pip install video-to-ascii[audio] # or "video-to-ascii[audio]" on zsh
 ```
 
 ## How to use
