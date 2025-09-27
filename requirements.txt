@@ -1,2 +1,15 @@
-opencv-python
-xtermcolor
+# Dependencias básicas
+opencv-python>=4.5.0
+xtermcolor>=2.0.0
+ffmpeg-python>=0.2.0
+
+# Dependencias opcionales para audio
+# Instalar con: pip install .[audio]
+# pyaudio>=0.2.11
+
+# Para desarrollo
+# Instalar con: pip install .[dev]
+# pytest>=6.0
+# black
+# flake8
+# mypy

@@ -35,16 +35,54 @@
 
 ## Installation
 
-Standard installation
+### From PyPI (Recommended)
+
+Standard installation (without audio support):
 
 ```bash
 $ pip install video-to-ascii
 ```
 
-With audio support installation
+With audio support:
 
 ```bash
-$ pip install video-to-ascii[audio] # or "video-to-ascii[audio]" on zsh
+$ pip install video-to-ascii[audio]
+```
+
+Complete installation (with all optional dependencies):
+
+```bash
+$ pip install video-to-ascii[all]
+```
+
+### 🔄 Migration Guide
+
+If you were using the old installation method with `--install-option`:
+
+```bash
+# ❌ Old way (no longer supported)
+$ pip install video-to-ascii --install-option="--with-audio"
+
+# ✅ New way  
+$ pip install video-to-ascii[audio]
+```
+
+**Note**: The `--install-option` flag has been [deprecated by pip](https://pip.pypa.io/en/stable/news/#deprecation-of-install-option-and-global-option) and removed in pip 23.1+.
+
+### From Source
+
+Clone the repository and install:
+
+```bash
+$ git clone https://github.com/joelibaceta/video-to-ascii.git
+$ cd video-to-ascii
+$ pip install .
+```
+
+Or with audio support:
+
+```bash
+$ pip install .[audio]
 ```
 
 ## How to use
