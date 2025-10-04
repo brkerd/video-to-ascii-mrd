@@ -93,6 +93,185 @@ class AsciiStrategy(re.RenderStrategy):
         
         return frame2
 
+    def wipe_transition(self, cap1, cap2, dimensions, output=None, direction='top'):
+        """
+        Perform wipe transition where new video progressively replaces old video
+        
+        Args:
+            cap1: First video capture (ending)
+            cap2: Second video capture (starting)
+            dimensions: Terminal dimensions
+            output: Output file if exporting
+            direction: Wipe direction ('top', 'bottom', 'left', 'right')
+        
+        Returns:
+            Last frame of transition
+        """
+        cols, rows = dimensions
+        
+        for i in range(self.transition_frames):
+            progress = i / self.transition_frames
+            
+            ret1, frame1 = cap1.read()
+            ret2, frame2 = cap2.read()
+            
+            if not ret1 or frame1 is None:
+                if ret2 and frame2 is not None:
+                    return frame2
+                return None
+            
+            if not ret2 or frame2 is None:
+                return frame1
+            
+            # Resize both frames
+            resized_frame1 = self.resize_frame(frame1, (cols, rows))
+            resized_frame2 = self.resize_frame(frame2, (cols, rows))
+            
+            h1, w1, _ = resized_frame1.shape
+            h2, w2, _ = resized_frame2.shape
+            
+            # Ensure same dimensions
+            if (h1, w1) != (h2, w2):
+                resized_frame2 = cv2.resize(resized_frame2, (w1, h1))
+            
+            # Create composite frame based on direction
+            composite = resized_frame1.copy()
+            
+            if direction == 'top':
+                # Wipe from top to bottom
+                wipe_line = int(h1 * progress)
+                if wipe_line > 0:
+                    composite[:wipe_line, :] = resized_frame2[:wipe_line, :]
+            elif direction == 'bottom':
+                # Wipe from bottom to top
+                wipe_line = int(h1 * (1 - progress))
+                if wipe_line < h1:
+                    composite[wipe_line:, :] = resized_frame2[wipe_line:, :]
+            elif direction == 'left':
+                # Wipe from left to right
+                wipe_col = int(w1 * progress)
+                if wipe_col > 0:
+                    composite[:, :wipe_col] = resized_frame2[:, :wipe_col]
+            elif direction == 'right':
+                # Wipe from right to left
+                wipe_col = int(w1 * (1 - progress))
+                if wipe_col < w1:
+                    composite[:, wipe_col:] = resized_frame2[:, wipe_col:]
+            
+            # Render composite frame
+            if output is None:
+                if PLATFORM:
+                    sys.stdout.write('\u001b[0;0H')
+                else:
+                    sys.stdout.write("\x1b[0;0H")
+                
+                msg = self.convert_frame_pixels_to_ascii(composite, (cols, rows))
+                sys.stdout.write(msg)
+                time.sleep(0.033)  # ~30fps
+        
+        return resized_frame2
+
+    def scan_transition(self, cap1, cap2, dimensions, output=None, direction='top', scan_speed=2):
+        """
+        Perform scanning transition with character-by-character replacement effect
+        Creates a more visible "scanning line" effect
+        
+        Args:
+            cap1: First video capture (ending)
+            cap2: Second video capture (starting)
+            dimensions: Terminal dimensions
+            output: Output file if exporting
+            direction: Scan direction ('top', 'bottom')
+            scan_speed: Number of rows to scan per frame (higher = faster)
+        
+        Returns:
+            Last frame of transition
+        """
+        cols, rows = dimensions
+        
+        # Get initial frames
+        ret1, frame1 = cap1.read()
+        ret2, frame2 = cap2.read()
+        
+        if not ret1 or not ret2 or frame1 is None or frame2 is None:
+            return frame2 if ret2 else frame1
+        
+        # Resize both frames once
+        resized_frame1 = self.resize_frame(frame1, (cols, rows))
+        resized_frame2 = self.resize_frame(frame2, (cols, rows))
+        
+        h, w, _ = resized_frame1.shape
+        
+        # Ensure same dimensions
+        if resized_frame2.shape != resized_frame1.shape:
+            resized_frame2 = cv2.resize(resized_frame2, (w, h))
+        
+        # Calculate total scan lines
+        total_lines = h
+        lines_per_frame = max(1, int(total_lines / self.transition_frames))
+        
+        current_line = 0
+        
+        while current_line < total_lines:
+            # Read new frames for animation
+            ret1, new_frame1 = cap1.read()
+            ret2, new_frame2 = cap2.read()
+            
+            if ret1 and new_frame1 is not None:
+                resized_frame1 = self.resize_frame(new_frame1, (cols, rows))
+            if ret2 and new_frame2 is not None:
+                resized_frame2 = self.resize_frame(new_frame2, (cols, rows))
+                if resized_frame2.shape != (h, w, 3):
+                    resized_frame2 = cv2.resize(resized_frame2, (w, h))
+            
+            # Create composite with scan line effect
+            composite = resized_frame1.copy()
+            
+            if direction == 'top':
+                # Replace from top
+                end_line = min(current_line + scan_speed, total_lines)
+                composite[:end_line, :] = resized_frame2[:end_line, :]
+                
+                # Add visual scan line effect (brighter line)
+                if end_line < total_lines:
+                    scan_line_thickness = 2
+                    for offset in range(scan_line_thickness):
+                        line_pos = min(end_line + offset, total_lines - 1)
+                        # Brighten the scan line
+                        composite[line_pos, :] = cv2.addWeighted(
+                            composite[line_pos, :], 0.5,
+                            resized_frame2[line_pos, :], 0.5, 50
+                        )
+            else:  # bottom
+                # Replace from bottom
+                start_line = max(total_lines - current_line - scan_speed, 0)
+                composite[start_line:, :] = resized_frame2[start_line:, :]
+                
+                # Add visual scan line effect
+                if start_line > 0:
+                    scan_line_thickness = 2
+                    for offset in range(scan_line_thickness):
+                        line_pos = max(start_line - offset, 0)
+                        composite[line_pos, :] = cv2.addWeighted(
+                            composite[line_pos, :], 0.5,
+                            resized_frame2[line_pos, :], 0.5, 50
+                        )
+            
+            # Render composite frame
+            if output is None:
+                if PLATFORM:
+                    sys.stdout.write('\u001b[0;0H')
+                else:
+                    sys.stdout.write("\x1b[0;0H")
+                
+                msg = self.convert_frame_pixels_to_ascii(composite, (cols, rows))
+                sys.stdout.write(msg)
+                time.sleep(0.033)  # ~30fps
+            
+            current_line += lines_per_frame
+        
+        return resized_frame2
+
     def slide_transition(self, frame1, frame2, progress, direction='left'):
         """
         Create a sliding transition effect
@@ -311,7 +490,7 @@ class AsciiStrategy(re.RenderStrategy):
             output: Output file if exporting
             output_format: Format of output ('sh' or 'json')
             with_audio: Enable audio playback
-            transition_type: Type of transition ('crossfade', 'slide', 'fade')
+            transition_type: Type of transition ('crossfade', 'wipe', 'scan', 'slide', 'fade')
         """
         if PLATFORM:
             sys.stdout.write("echo -en '\033[2J' \n")
@@ -345,6 +524,10 @@ class AsciiStrategy(re.RenderStrategy):
                     
                     if transition_type == 'crossfade':
                         self.crossfade_transition(cap, next_cap, (cols, rows), output)
+                    elif transition_type == 'wipe':
+                        self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
+                    elif transition_type == 'scan':
+                        self.scan_transition(cap, next_cap, (cols, rows), output, direction='top', scan_speed=3)
                     
                     next_cap.release()
             
