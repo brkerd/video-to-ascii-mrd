@@ -23,6 +23,114 @@ DEFAULT_TERMINAL_SIZE = _term_size().columns, _term_size().lines
 class AsciiStrategy(re.RenderStrategy):
     """Print each frame in the terminal using ascii characters"""
 
+    def __init__(self):
+        self.current_video_index = 0
+        self.transition_frames = 15  # Number of frames for transition
+        self.is_transitioning = False
+        self.next_frame = None
+
+    def blend_frames(self, frame1, frame2, alpha):
+        """
+        Blend two frames together using alpha compositing
+        
+        Args:
+            frame1: First frame
+            frame2: Second frame
+            alpha: Blend factor (0.0 to 1.0), where 0 is fully frame1, 1 is fully frame2
+        
+        Returns:
+            Blended frame
+        """
+        if frame1.shape != frame2.shape:
+            frame2 = cv2.resize(frame2, (frame1.shape[1], frame1.shape[0]))
+        
+        return cv2.addWeighted(frame1, 1 - alpha, frame2, alpha, 0)
+
+    def crossfade_transition(self, cap1, cap2, dimensions, output=None):
+        """
+        Perform crossfade transition between two video captures
+        
+        Args:
+            cap1: First video capture (ending)
+            cap2: Second video capture (starting)
+            dimensions: Terminal dimensions
+            output: Output file if exporting
+        
+        Returns:
+            Last frame of transition
+        """
+        for i in range(self.transition_frames):
+            alpha = i / self.transition_frames
+            
+            ret1, frame1 = cap1.read()
+            ret2, frame2 = cap2.read()
+            
+            if not ret1 or frame1 is None:
+                # If first video ended, just show second video
+                if ret2 and frame2 is not None:
+                    return frame2
+                return None
+            
+            if not ret2 or frame2 is None:
+                # If second video not ready, just show first video
+                return frame1
+            
+            # Blend frames
+            blended = self.blend_frames(frame1, frame2, alpha)
+            
+            # Render blended frame
+            if output is None:
+                cols, rows = dimensions
+                if PLATFORM:
+                    sys.stdout.write('\u001b[0;0H')
+                else:
+                    sys.stdout.write("\x1b[0;0H")
+                
+                resized_frame = self.resize_frame(blended, (cols, rows))
+                msg = self.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
+                sys.stdout.write(msg)
+                time.sleep(0.033)  # ~30fps
+        
+        return frame2
+
+    def slide_transition(self, frame1, frame2, progress, direction='left'):
+        """
+        Create a sliding transition effect
+        
+        Args:
+            frame1: Outgoing frame
+            frame2: Incoming frame
+            progress: Transition progress (0.0 to 1.0)
+            direction: Slide direction ('left', 'right', 'up', 'down')
+        """
+        h, w = frame1.shape[:2]
+        
+        if direction == 'left':
+            offset = int(w * progress)
+            result = frame1.copy()
+            result[:, :w-offset] = frame1[:, offset:]
+            result[:, w-offset:] = frame2[:, :offset]
+        elif direction == 'right':
+            offset = int(w * progress)
+            result = frame1.copy()
+            result[:, offset:] = frame1[:, :w-offset]
+            result[:, :offset] = frame2[:, w-offset:]
+        
+        return result
+
+    def fade_transition(self, frame, progress, fade_out=True):
+        """
+        Create a fade to black transition
+        
+        Args:
+            frame: Frame to fade
+            progress: Fade progress (0.0 to 1.0)
+            fade_out: True for fade out, False for fade in
+        """
+        alpha = 1 - progress if fade_out else progress
+        black_frame = frame * 0  # Create black frame
+        return cv2.addWeighted(frame, alpha, black_frame, 1 - alpha, 0)
+
     def convert_frame_pixels_to_ascii(self, frame, dimensions=DEFAULT_TERMINAL_SIZE, new_line_chars=False):
         """
         Replace all pixels with colored chars and return the resulting string
@@ -193,6 +301,59 @@ class AsciiStrategy(re.RenderStrategy):
         # close the frame array
         if output is not None and output_format == 'json':
             file.write(f"]\n")
+
+    def render_playlist(self, video_paths, output=None, output_format=None, with_audio=False, transition_type='crossfade'):
+        """
+        Render multiple videos with smooth transitions
+        
+        Args:
+            video_paths: List of video file paths
+            output: Output file if exporting
+            output_format: Format of output ('sh' or 'json')
+            with_audio: Enable audio playback
+            transition_type: Type of transition ('crossfade', 'slide', 'fade')
+        """
+        if PLATFORM:
+            sys.stdout.write("echo -en '\033[2J' \n")
+        else:
+            sys.stdout.write('\033[2J')
+        
+        for idx, video_path in enumerate(video_paths):
+            cap = cv2.VideoCapture(video_path)
+            
+            if not cap.isOpened():
+                print(f"Error: Could not open video {video_path}")
+                continue
+            
+            # Get terminal dimensions
+            if PLATFORM:
+                rows, cols = os.popen('stty size', 'r').read().split()
+            else:
+                cols, rows = os.get_terminal_size()
+            
+            # Render current video
+            self.render(cap, output, output_format, with_audio)
+            
+            # Perform transition to next video if available
+            if idx < len(video_paths) - 1:
+                next_cap = cv2.VideoCapture(video_paths[idx + 1])
+                
+                if next_cap.isOpened():
+                    # Reopen current video to get last frames
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 
+                           cap.get(cv2.CAP_PROP_FRAME_COUNT) - self.transition_frames)
+                    
+                    if transition_type == 'crossfade':
+                        self.crossfade_transition(cap, next_cap, (cols, rows), output)
+                    
+                    next_cap.release()
+            
+            cap.release()
+        
+        if PLATFORM:
+            sys.stdout.write("echo -en '\033[2J' \n")
+        else:
+            os.system('cls') or None
 
     def build_progress(self, progress, total):
         """Build a progress bar in the terminal"""
