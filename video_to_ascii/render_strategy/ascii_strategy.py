@@ -6,7 +6,9 @@ import time
 import sys
 import os
 import cv2
-import tempfile 
+import tempfile
+import threading
+import queue
 
 PLATFORM = 0
 if sys.platform != 'win32':
@@ -568,4 +570,227 @@ class AsciiStrategy(re.RenderStrategy):
         dimension = (reduced_width, reduced_height)
         resized_frame = cv2.resize(frame, dimension, interpolation=cv2.INTER_LINEAR)
         return resized_frame
+
+
+class PlayerState:
+    """States for the video player engine"""
+    IDLE = "idle"
+    TRANSITIONING = "transitioning"
+    PLAYING = "playing"
+
+
+class VideoPlayerEngine:
+    """Video player engine with idle loop and dynamic video queueing"""
+    
+    def __init__(self, strategy, idle_video_path):
+        """
+        Initialize the video player engine
+        
+        Args:
+            strategy: AsciiStrategy instance for rendering
+            idle_video_path: Path to the idle/default video to loop
+        """
+        self.strategy = strategy
+        self.idle_video_path = idle_video_path
+        self.video_queue = queue.Queue()
+        self.state = PlayerState.IDLE
+        self.current_cap = None
+        self.is_running = False
+        self.lock = threading.Lock()
+        
+    def add_video(self, video_path):
+        """
+        Add a video to the playback queue
+        
+        Args:
+            video_path: Path to the video file to queue
+        """
+        self.video_queue.put(video_path)
+        
+    def start(self, transition_type='wipe', transition_direction='top'):
+        """
+        Start the video player engine
+        
+        Args:
+            transition_type: Type of transition ('crossfade', 'wipe', 'scan')
+            transition_direction: Direction for wipe/scan transitions
+        """
+        self.is_running = True
+        self.transition_type = transition_type
+        self.transition_direction = transition_direction
+        
+        if PLATFORM:
+            sys.stdout.write("echo -en '\033[2J' \n")
+        else:
+            sys.stdout.write('\033[2J')
+        
+        while self.is_running:
+            with self.lock:
+                if self.state == PlayerState.IDLE:
+                    self._play_idle()
+                elif self.state == PlayerState.PLAYING:
+                    self._play_queued_video()
+    
+    def _play_idle(self):
+        """Play idle video in loop, checking for queued videos"""
+        cap = cv2.VideoCapture(self.idle_video_path)
+        
+        if not cap.isOpened():
+            print(f"Error: Could not open idle video {self.idle_video_path}")
+            return
+        
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        time_delta = 1.0 / fps
+        
+        if PLATFORM:
+            rows, cols = os.popen('stty size', 'r').read().split()
+            rows, cols = int(rows), int(cols)
+        else:
+            cols, rows = os.get_terminal_size()
+        
+        while self.is_running and self.state == PlayerState.IDLE:
+            # Check if video should be queued
+            if not self.video_queue.empty():
+                self.state = PlayerState.TRANSITIONING
+                video_path = self.video_queue.get()
+                self._transition_to_video(cap, video_path, (cols, rows))
+                cap.release()
+                return
+            
+            t0 = time.process_time()
+            ret, frame = cap.read()
+            
+            # Loop idle video
+            if not ret or frame is None:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            
+            # Render frame
+            if PLATFORM:
+                sys.stdout.write('\u001b[0;0H')
+            else:
+                sys.stdout.write("\x1b[0;0H")
+            
+            resized_frame = self.strategy.resize_frame(frame, (cols, rows))
+            msg = self.strategy.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
+            sys.stdout.write(msg)
+            sys.stdout.flush()
+            
+            t1 = time.process_time()
+            delta = time_delta - (t1 - t0)
+            if delta > 0:
+                time.sleep(delta)
+        
+        cap.release()
+    
+    def _transition_to_video(self, from_cap, to_video_path, dimensions):
+        """
+        Transition from current video to queued video
+        
+        Args:
+            from_cap: Current video capture
+            to_video_path: Path to the next video
+            dimensions: Terminal dimensions (cols, rows)
+        """
+        to_cap = cv2.VideoCapture(to_video_path)
+        
+        if not to_cap.isOpened():
+            print(f"Error: Could not open video {to_video_path}")
+            self.state = PlayerState.IDLE
+            return
+        
+        # Perform transition
+        if self.transition_type == 'crossfade':
+            self.strategy.crossfade_transition(from_cap, to_cap, dimensions)
+        elif self.transition_type == 'wipe':
+            self.strategy.wipe_transition(from_cap, to_cap, dimensions, direction=self.transition_direction)
+        elif self.transition_type == 'scan':
+            self.strategy.scan_transition(from_cap, to_cap, dimensions, direction=self.transition_direction, scan_speed=3)
+        
+        # Start playing the queued video
+        self.state = PlayerState.PLAYING
+        self.current_cap = to_cap
+    
+    def _play_queued_video(self):
+        """Play the queued video until completion"""
+        if self.current_cap is None:
+            self.state = PlayerState.IDLE
+            return
+        
+        fps = self.current_cap.get(cv2.CAP_PROP_FPS) or 30
+        time_delta = 1.0 / fps
+        
+        if PLATFORM:
+            rows, cols = os.popen('stty size', 'r').read().split()
+            rows, cols = int(rows), int(cols)
+        else:
+            cols, rows = os.get_terminal_size()
+        
+        while self.is_running and self.state == PlayerState.PLAYING:
+            t0 = time.process_time()
+            ret, frame = self.current_cap.read()
+            
+            # Video finished, transition back to idle
+            if not ret or frame is None:
+                self._transition_back_to_idle((cols, rows))
+                return
+            
+            # Render frame
+            if PLATFORM:
+                sys.stdout.write('\u001b[0;0H')
+            else:
+                sys.stdout.write("\x1b[0;0H")
+            
+            resized_frame = self.strategy.resize_frame(frame, (cols, rows))
+            msg = self.strategy.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
+            sys.stdout.write(msg)
+            sys.stdout.flush()
+            
+            t1 = time.process_time()
+            delta = time_delta - (t1 - t0)
+            if delta > 0:
+                time.sleep(delta)
+    
+    def _transition_back_to_idle(self, dimensions):
+        """
+        Transition from queued video back to idle
+        
+        Args:
+            dimensions: Terminal dimensions (cols, rows)
+        """
+        idle_cap = cv2.VideoCapture(self.idle_video_path)
+        
+        if not idle_cap.isOpened():
+            print(f"Error: Could not open idle video {self.idle_video_path}")
+            self.current_cap.release()
+            self.current_cap = None
+            self.state = PlayerState.IDLE
+            return
+        
+        # Use opposite direction for return transition
+        return_direction = 'bottom' if self.transition_direction == 'top' else 'top'
+        
+        # Perform transition
+        if self.transition_type == 'crossfade':
+            self.strategy.crossfade_transition(self.current_cap, idle_cap, dimensions)
+        elif self.transition_type == 'wipe':
+            self.strategy.wipe_transition(self.current_cap, idle_cap, dimensions, direction=return_direction)
+        elif self.transition_type == 'scan':
+            self.strategy.scan_transition(self.current_cap, idle_cap, dimensions, direction=return_direction, scan_speed=3)
+        
+        self.current_cap.release()
+        self.current_cap = None
+        idle_cap.release()
+        self.state = PlayerState.IDLE
+    
+    def stop(self):
+        """Stop the video player engine"""
+        self.is_running = False
+        if self.current_cap:
+            self.current_cap.release()
+        
+        if PLATFORM:
+            sys.stdout.write("echo -en '\033[2J' \n")
+        else:
+            os.system('cls') or None
         
