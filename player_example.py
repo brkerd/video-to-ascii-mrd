@@ -4,7 +4,9 @@ Example usage of the VideoPlayerEngine with idle loop and dynamic video queueing
 This script demonstrates how to:
 1. Create a video player that loops an idle video
 2. Queue videos dynamically based on user input
-3. Transition smoothly between idle and queued videos using wipe transitions
+3. Videos loop continuously until another video is queued
+4. Transition smoothly between idle and queued videos using wipe transitions
+5. Return to idle state manually
 """
 
 import threading
@@ -23,9 +25,14 @@ def input_handler(player_engine, video_map):
     print("Video Player Controls:")
     print("="*50)
     for key, path in video_map.items():
-        if key != 'q':
-            print(f"Press '{key}' to play: {path}")
+        if key == 'i':
+            print(f"Press '{key}' to return to idle")
+        elif key != 'q':
+            print(f"Press '{key}' to play (looping): {path}")
     print("Press 'q' to quit")
+    print("="*50)
+    print("Note: Videos will loop with wipe transitions")
+    print("      until you select another video")
     print("="*50 + "\n")
     
     while player_engine.is_running:
@@ -36,9 +43,12 @@ def input_handler(player_engine, video_map):
                 print("Stopping player...")
                 player_engine.stop()
                 break
-            elif user_input in video_map and user_input != 'q':
+            elif user_input == 'i':
+                print("✓ Returning to idle...")
+                player_engine.return_to_idle()
+            elif user_input in video_map and user_input not in ['i', 'q']:
                 player_engine.add_video(video_map[user_input])
-                print(f"✓ Added video '{user_input}' to queue")
+                print(f"✓ Added video '{user_input}' to queue (will loop)")
             elif user_input:
                 print(f"✗ Invalid input '{user_input}'. Try again.")
         except EOFError:
@@ -56,6 +66,7 @@ def main():
         '1': 'path/to/video1.mp4',
         '2': 'path/to/video2.mp4',
         '3': 'path/to/video3.mp4',
+        'i': 'return_to_idle',
         'q': 'quit'
     }
     
@@ -79,6 +90,7 @@ def main():
     try:
         # Start the player (blocking call)
         # Using 'wipe' transition with 'top' direction
+        # Videos will loop with the same wipe transition
         player.start(transition_type='wipe', transition_direction='top')
     except KeyboardInterrupt:
         print("\nShutting down player...")

@@ -595,6 +595,7 @@ class VideoPlayerEngine:
         self.video_queue = queue.Queue()
         self.state = PlayerState.IDLE
         self.current_cap = None
+        self.current_video_path = None
         self.is_running = False
         self.lock = threading.Lock()
         
@@ -606,6 +607,13 @@ class VideoPlayerEngine:
             video_path: Path to the video file to queue
         """
         self.video_queue.put(video_path)
+        
+    def return_to_idle(self):
+        """Manually return to idle state from playing video"""
+        with self.lock:
+            if self.state == PlayerState.PLAYING:
+                # None signals return to idle
+                self.video_queue.put(None)
         
     def start(self, transition_type='wipe', transition_direction='top'):
         """
@@ -710,9 +718,10 @@ class VideoPlayerEngine:
         # Start playing the queued video
         self.state = PlayerState.PLAYING
         self.current_cap = to_cap
+        self.current_video_path = to_video_path
     
     def _play_queued_video(self):
-        """Play the queued video until completion"""
+        """Play the queued video in a loop until another video is queued or stopped"""
         if self.current_cap is None:
             self.state = PlayerState.IDLE
             return
@@ -727,13 +736,25 @@ class VideoPlayerEngine:
             cols, rows = os.get_terminal_size()
         
         while self.is_running and self.state == PlayerState.PLAYING:
+            # Check if a new video is queued or return to idle requested
+            if not self.video_queue.empty():
+                video_path = self.video_queue.get()
+                
+                # None signals return to idle
+                if video_path is None:
+                    self._transition_back_to_idle((cols, rows))
+                    return
+                
+                self._transition_to_next_video(video_path, (cols, rows))
+                continue
+            
             t0 = time.process_time()
             ret, frame = self.current_cap.read()
             
-            # Video finished, transition back to idle
+            # Video finished, loop back to start with wipe transition
             if not ret or frame is None:
-                self._transition_back_to_idle((cols, rows))
-                return
+                self._loop_current_video((cols, rows))
+                continue
             
             # Render frame
             if PLATFORM:
@@ -751,6 +772,65 @@ class VideoPlayerEngine:
             if delta > 0:
                 time.sleep(delta)
     
+    def _loop_current_video(self, dimensions):
+        """
+        Loop the current video back to start with wipe transition
+        
+        Args:
+            dimensions: Terminal dimensions (cols, rows)
+        """
+        if self.current_cap is None or self.current_video_path is None:
+            return
+        
+        # Create new capture from beginning for transition
+        new_cap = cv2.VideoCapture(self.current_video_path)
+        
+        if not new_cap.isOpened():
+            # If can't reopen, just reset to beginning
+            self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            return
+        
+        # Perform wipe transition from end back to beginning
+        if self.transition_type == 'crossfade':
+            self.strategy.crossfade_transition(self.current_cap, new_cap, dimensions)
+        elif self.transition_type == 'wipe':
+            self.strategy.wipe_transition(self.current_cap, new_cap, dimensions, direction=self.transition_direction)
+        elif self.transition_type == 'scan':
+            self.strategy.scan_transition(self.current_cap, new_cap, dimensions, direction=self.transition_direction, scan_speed=3)
+        
+        # Release old capture and use new one
+        self.current_cap.release()
+        self.current_cap = new_cap
+    
+    def _transition_to_next_video(self, to_video_path, dimensions):
+        """
+        Transition from current playing video to a new queued video
+        
+        Args:
+            to_video_path: Path to the next video
+            dimensions: Terminal dimensions (cols, rows)
+        """
+        to_cap = cv2.VideoCapture(to_video_path)
+        
+        if not to_cap.isOpened():
+            print(f"Error: Could not open video {to_video_path}")
+            return
+        
+        # Perform transition from current video to new video
+        if self.transition_type == 'crossfade':
+            self.strategy.crossfade_transition(self.current_cap, to_cap, dimensions)
+        elif self.transition_type == 'wipe':
+            self.strategy.wipe_transition(self.current_cap, to_cap, dimensions, direction=self.transition_direction)
+        elif self.transition_type == 'scan':
+            self.strategy.scan_transition(self.current_cap, to_cap, dimensions, direction=self.transition_direction, scan_speed=3)
+        
+        # Release old capture and switch to new one
+        self.current_cap.release()
+        self.current_cap = to_cap
+        self.current_video_path = to_video_path
+        
+        # Stay in PLAYING state to continue with new video
+    
     def _transition_back_to_idle(self, dimensions):
         """
         Transition from queued video back to idle
@@ -764,6 +844,7 @@ class VideoPlayerEngine:
             print(f"Error: Could not open idle video {self.idle_video_path}")
             self.current_cap.release()
             self.current_cap = None
+            self.current_video_path = None
             self.state = PlayerState.IDLE
             return
         
@@ -780,6 +861,7 @@ class VideoPlayerEngine:
         
         self.current_cap.release()
         self.current_cap = None
+        self.current_video_path = None
         idle_cap.release()
         self.state = PlayerState.IDLE
     
