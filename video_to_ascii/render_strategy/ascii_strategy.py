@@ -782,25 +782,91 @@ class VideoPlayerEngine:
         if self.current_cap is None or self.current_video_path is None:
             return
         
-        # Create new capture from beginning for transition
-        new_cap = cv2.VideoCapture(self.current_video_path)
+        cols, rows = dimensions
         
-        if not new_cap.isOpened():
+        # Get total frames and position near the end for transition
+        total_frames = self.current_cap.get(cv2.CAP_PROP_FRAME_COUNT)
+        fps = self.current_cap.get(cv2.CAP_PROP_FPS) or 30
+        frame_delay = 1.0 / fps
+        
+        # Position at transition_frames before the end
+        transition_start = max(0, int(total_frames - self.strategy.transition_frames - 2))
+        self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, transition_start)
+        
+        # Open a second capture from the beginning
+        start_cap = cv2.VideoCapture(self.current_video_path)
+        
+        if not start_cap.isOpened():
             # If can't reopen, just reset to beginning
             self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             return
         
-        # Perform wipe transition from end back to beginning
-        if self.transition_type == 'crossfade':
-            self.strategy.crossfade_transition(self.current_cap, new_cap, dimensions)
-        elif self.transition_type == 'wipe':
-            self.strategy.wipe_transition(self.current_cap, new_cap, dimensions, direction=self.transition_direction)
-        elif self.transition_type == 'scan':
-            self.strategy.scan_transition(self.current_cap, new_cap, dimensions, direction=self.transition_direction, scan_speed=3)
+        # Manually perform wipe transition
+        for i in range(self.strategy.transition_frames):
+            progress = (i + 1) / self.strategy.transition_frames
+            
+            # Read from end of video
+            ret1, frame1 = self.current_cap.read()
+            # Read from beginning of video
+            ret2, frame2 = start_cap.read()
+            
+            # If we run out of frames at the end, get the last frame
+            if not ret1 or frame1 is None:
+                self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, int(total_frames - 1))
+                ret1, frame1 = self.current_cap.read()
+                if not ret1 or frame1 is None:
+                    break
+            
+            if not ret2 or frame2 is None:
+                break
+            
+            # Resize both frames
+            resized_frame1 = self.strategy.resize_frame(frame1, (cols, rows))
+            resized_frame2 = self.strategy.resize_frame(frame2, (cols, rows))
+            
+            h1, w1, _ = resized_frame1.shape
+            h2, w2, _ = resized_frame2.shape
+            
+            # Ensure same dimensions
+            if (h1, w1) != (h2, w2):
+                resized_frame2 = cv2.resize(resized_frame2, (w1, h1))
+                h2, w2 = h1, w1
+            
+            # Create composite frame with wipe effect
+            composite = resized_frame1.copy()
+            
+            if self.transition_direction == 'top':
+                wipe_line = int(h1 * progress)
+                if wipe_line > 0 and wipe_line <= h1:
+                    composite[:wipe_line, :] = resized_frame2[:wipe_line, :]
+            elif self.transition_direction == 'bottom':
+                wipe_line = int(h1 * (1 - progress))
+                if wipe_line >= 0 and wipe_line < h1:
+                    composite[wipe_line:, :] = resized_frame2[wipe_line:, :]
+            elif self.transition_direction == 'left':
+                wipe_col = int(w1 * progress)
+                if wipe_col > 0 and wipe_col <= w1:
+                    composite[:, :wipe_col] = resized_frame2[:, :wipe_col]
+            elif self.transition_direction == 'right':
+                wipe_col = int(w1 * (1 - progress))
+                if wipe_col >= 0 and wipe_col < w1:
+                    composite[:, wipe_col:] = resized_frame2[:, wipe_col:]
+            
+            # Render composite frame
+            if PLATFORM:
+                sys.stdout.write('\u001b[0;0H')
+            else:
+                sys.stdout.write("\x1b[0;0H")
+            
+            msg = self.strategy.convert_frame_pixels_to_ascii(composite, (cols, rows))
+            sys.stdout.write(msg)
+            sys.stdout.flush()
+            
+            time.sleep(frame_delay)
         
-        # Release old capture and use new one
-        self.current_cap.release()
-        self.current_cap = new_cap
+        # Close the start capture and reset main capture to beginning
+        start_cap.release()
+        self.current_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
     
     def _transition_to_next_video(self, to_video_path, dimensions):
         """
