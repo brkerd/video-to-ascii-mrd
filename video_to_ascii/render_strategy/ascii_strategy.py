@@ -55,6 +55,11 @@ class AsciiStrategy(re.RenderStrategy):
         self.max_valid_distance = 700  # Disregard readings above this
         self.smoothed_distance = 100.0  # The averaged distance
         
+        # State persistence - require consistency before changing
+        self.pending_state = None
+        self.pending_state_count = 0
+        self.state_persistence_threshold = 8  # Must see new state for 8 frames (~0.25 sec at 30fps)
+        
     def start_distance_reading(self):
         """Start background thread for continuous distance reading"""
         self.reading_distance = True
@@ -98,6 +103,42 @@ class AsciiStrategy(re.RenderStrategy):
         """Get the most recently read distance value (non-blocking)"""
         with self.distance_lock:
             return self.latest_distance
+    
+    def should_change_state(self, current_state, new_state):
+        """
+        Determine if state should actually change based on persistence
+        Requires the new state to be consistent for multiple frames
+        
+        Args:
+            current_state: The current active state
+            new_state: The proposed new state
+            
+        Returns:
+            bool: True if state should change, False otherwise
+        """
+        # If states are the same, no change needed
+        if current_state == new_state:
+            self.pending_state = None
+            self.pending_state_count = 0
+            return False
+        
+        # If this is a new proposed state, reset counter
+        if self.pending_state != new_state:
+            self.pending_state = new_state
+            self.pending_state_count = 1
+            return False
+        
+        # Increment count for persistent state
+        self.pending_state_count += 1
+        
+        # Check if we've seen this state enough times
+        if self.pending_state_count >= self.state_persistence_threshold:
+            # Reset for next change
+            self.pending_state = None
+            self.pending_state_count = 0
+            return True
+        
+        return False
 
     @staticmethod
     def check_distance():
@@ -598,8 +639,8 @@ class AsciiStrategy(re.RenderStrategy):
                     else:
                         new_state = States.IDLE.value
                     
-                    # If state changed, break to transition
-                    if current_state != new_state:
+                    # Only change if new state persists for multiple frames
+                    if self.should_change_state(current_state, new_state):
                         current_state = new_state
                         state_changed = True
                         break
