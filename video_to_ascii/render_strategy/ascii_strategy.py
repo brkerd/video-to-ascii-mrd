@@ -2,11 +2,16 @@
 This module contains a class AsciiColorStrategy, to process video frames and build an ascii output
 """
 
+from enum import Enum
+import struct
 import time
 import sys
 import os
 import cv2
-import tempfile 
+import tempfile
+
+import serial 
+from . import distance as dis
 
 PLATFORM = 0
 if sys.platform != 'win32':
@@ -20,14 +25,28 @@ else:
 from os import get_terminal_size as _term_size
 DEFAULT_TERMINAL_SIZE = _term_size().columns, _term_size().lines
 
+class States(Enum):
+    IDLE = 's1.mp4'
+    LAUGH = 's2.mp4'
+    CURIOUS = 'curious.mp4'
+    ANNOYED = 'annoyed.mp4'
+    ANGRY = 'angry.mp4'
+
 class AsciiStrategy(re.RenderStrategy):
     """Print each frame in the terminal using ascii characters"""
+    ser = serial.Serial('/dev/tty.usbserial-1130', 115200)
 
     def __init__(self):
         self.current_video_index = 0
         self.transition_frames = 15  # Number of frames for transition
         self.is_transitioning = False
         self.next_frame = None
+        
+    
+
+    def check_distance():
+        bites = AsciiStrategy.ser.read(4)
+        return struct.unpack('f',bites)[0]
 
     def blend_frames(self, frame1, frame2, alpha):
         """
@@ -272,43 +291,9 @@ class AsciiStrategy(re.RenderStrategy):
         
         return resized_frame2
 
-    def slide_transition(self, frame1, frame2, progress, direction='left'):
-        """
-        Create a sliding transition effect
-        
-        Args:
-            frame1: Outgoing frame
-            frame2: Incoming frame
-            progress: Transition progress (0.0 to 1.0)
-            direction: Slide direction ('left', 'right', 'up', 'down')
-        """
-        h, w = frame1.shape[:2]
-        
-        if direction == 'left':
-            offset = int(w * progress)
-            result = frame1.copy()
-            result[:, :w-offset] = frame1[:, offset:]
-            result[:, w-offset:] = frame2[:, :offset]
-        elif direction == 'right':
-            offset = int(w * progress)
-            result = frame1.copy()
-            result[:, offset:] = frame1[:, :w-offset]
-            result[:, :offset] = frame2[:, w-offset:]
-        
-        return result
+    
 
-    def fade_transition(self, frame, progress, fade_out=True):
-        """
-        Create a fade to black transition
-        
-        Args:
-            frame: Frame to fade
-            progress: Fade progress (0.0 to 1.0)
-            fade_out: True for fade out, False for fade in
-        """
-        alpha = 1 - progress if fade_out else progress
-        black_frame = frame * 0  # Create black frame
-        return cv2.addWeighted(frame, alpha, black_frame, 1 - alpha, 0)
+    
 
     def convert_frame_pixels_to_ascii(self, frame, dimensions=DEFAULT_TERMINAL_SIZE, new_line_chars=False):
         """
@@ -352,7 +337,7 @@ class AsciiStrategy(re.RenderStrategy):
         return msg
 
     def apply_pixel_to_ascii_strategy(self, pixel):
-        return ipe.pixel_to_ascii(pixel)
+        return ipe.pixel_to_ascii(pixel, colored=False)
 
     def apply_end_line_modifier(self, msg):
         return msg
@@ -409,10 +394,10 @@ class AsciiStrategy(re.RenderStrategy):
 
         time_delta = 1./fps
         counter=0
-        if PLATFORM:
-            sys.stdout.write("echo -en '\033[2J' \n")
-        else:
-            sys.stdout.write('\033[2J')
+        # if PLATFORM:
+        #     sys.stdout.write("echo -en '\033[2J' \n")
+        # else:
+        #     sys.stdout.write('\033[2J')
         # read each frame
         while cap.isOpened():
             t0 = time.process_time()
@@ -472,16 +457,16 @@ class AsciiStrategy(re.RenderStrategy):
         if with_audio:
             stream.close()
             p.terminate()
-        if PLATFORM:
-            sys.stdout.write("echo -en '\033[2J' \n")
-        else:
-            os.system('cls') or None
+        # if PLATFORM:
+        #     sys.stdout.write("echo -en '\033[2J' \n")
+        # else:
+        #     os.system('cls') or None
 
         # close the frame array
         if output is not None and output_format == 'json':
             file.write(f"]\n")
 
-    def render_playlist(self, video_paths, output=None, output_format=None, with_audio=False, transition_type='crossfade'):
+    def render_playlist(self, video_paths, idle_path, output=None, output_format=None, with_audio=False, transition_type='crossfade', current_state = States.IDLE.value):
         """
         Render multiple videos with smooth transitions
         
@@ -497,11 +482,13 @@ class AsciiStrategy(re.RenderStrategy):
         else:
             sys.stdout.write('\033[2J')
         
-        for idx, video_path in enumerate(video_paths):
-            cap = cv2.VideoCapture(video_path)
+        
+        
+        while True:
+            cap = cv2.VideoCapture(current_state)
             
             if not cap.isOpened():
-                print(f"Error: Could not open video {video_path}")
+                print(f"Error: Could not open video")
                 continue
             
             # Get terminal dimensions
@@ -510,33 +497,88 @@ class AsciiStrategy(re.RenderStrategy):
             else:
                 cols, rows = os.get_terminal_size()
             
-            # Render current video
-            self.render(cap, output, output_format, with_audio)
+            # Get video properties
+            fps = cap.get(cv2.CAP_PROP_FPS) or 30
+            time_delta = 1./fps
             
-            # Perform transition to next video if available
-            if idx < len(video_paths) - 1:
-                next_cap = cv2.VideoCapture(video_paths[idx + 1])
+            # Render video frame by frame with distance checking
+            video_finished = False
+            state_changed = False
+            
+            while cap.isOpened():
+                t0 = time.process_time()
                 
+                # Read and render frame
+                _ret, frame = cap.read()
+                if frame is None:
+                    video_finished = True
+                    break
+                
+                # Render the frame
+                if PLATFORM:
+                    sys.stdout.write('\u001b[0;0H')
+                else:
+                    sys.stdout.write("\x1b[0;0H")
+                
+                resized_frame = self.resize_frame(frame, (cols, rows))
+                msg = self.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
+                sys.stdout.write(msg)
+                
+                # Check distance and determine new state
+                x = AsciiStrategy.check_distance()
+                new_state = current_state
+                
+                # Define your distance ranges and corresponding states
+                if int(x) < 20:
+                    new_state = States.LAUGH.value
+                elif int(x) < 40:
+                    new_state = States.CURIOUS.value
+                elif int(x) < 60:
+                    new_state = States.ANNOYED.value
+                elif int(x) < 80:
+                    new_state = States.ANGRY.value
+                else:
+                    new_state = States.IDLE.value
+                
+                # If state changed, break to transition
+                if current_state != new_state:
+                    current_state = new_state
+                    state_changed = True
+                    break
+                
+                # Maintain frame rate
+                t1 = time.process_time()
+                delta = time_delta - (t1 - t0)
+                if delta > 0:
+                    time.sleep(delta)
+            
+            # Handle transition or loop
+            if state_changed:
+                # State changed - transition to new video
+                next_cap = cv2.VideoCapture(current_state)
                 if next_cap.isOpened():
-                    # Reopen current video to get last frames
+                    # Position current video near end for smooth transition
+                    current_frame = cap.get(cv2.CAP_PROP_POS_FRAMES)
+                    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    
+                    # Only do transition if we have enough frames left
+                    if total_frames - current_frame > self.transition_frames:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 
+                               current_frame + max(0, int(total_frames - current_frame - self.transition_frames)))
+                    
+                    self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
+                    next_cap.release()
+            elif video_finished:
+                # Video finished naturally - loop it
+                next_cap = cv2.VideoCapture(current_state)
+                if next_cap.isOpened():
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 
-                           cap.get(cv2.CAP_PROP_FRAME_COUNT) - self.transition_frames)
-                    
-                    if transition_type == 'crossfade':
-                        self.crossfade_transition(cap, next_cap, (cols, rows), output)
-                    elif transition_type == 'wipe':
-                        self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
-                    elif transition_type == 'scan':
-                        self.scan_transition(cap, next_cap, (cols, rows), output, direction='top', scan_speed=3)
-                    
+                           int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - self.transition_frames))
+                    self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
                     next_cap.release()
             
             cap.release()
         
-        if PLATFORM:
-            sys.stdout.write("echo -en '\033[2J' \n")
-        else:
-            os.system('cls') or None
 
     def build_progress(self, progress, total):
         """Build a progress bar in the terminal"""
