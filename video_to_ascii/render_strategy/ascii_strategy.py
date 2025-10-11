@@ -9,6 +9,7 @@ import sys
 import os
 import cv2
 import tempfile
+import threading
 
 import serial 
 from . import distance as dis
@@ -42,8 +43,44 @@ class AsciiStrategy(re.RenderStrategy):
         self.is_transitioning = False
         self.next_frame = None
         
+        # Add async distance reading support
+        self.latest_distance = 100.0  # Default distance (IDLE state)
+        self.distance_lock = threading.Lock()
+        self.distance_thread = None
+        self.reading_distance = False
+        
+    def start_distance_reading(self):
+        """Start background thread for continuous distance reading"""
+        self.reading_distance = True
+        self.distance_thread = threading.Thread(target=self._read_distance_loop, daemon=True)
+        self.distance_thread.start()
     
+    def stop_distance_reading(self):
+        """Stop background distance reading"""
+        self.reading_distance = False
+        if self.distance_thread:
+            self.distance_thread.join(timeout=1.0)
+    
+    def _read_distance_loop(self):
+        """Background loop to continuously read distance from Arduino"""
+        while self.reading_distance:
+            try:
+                bites = AsciiStrategy.ser.read(4)
+                distance = struct.unpack('f', bites)[0]
+                
+                with self.distance_lock:
+                    self.latest_distance = distance
+            except Exception as e:
+                # Handle serial read errors gracefully
+                print(f"Distance read error: {e}")
+                time.sleep(0.1)  # Brief pause before retry
+    
+    def get_latest_distance(self):
+        """Get the most recently read distance value (non-blocking)"""
+        with self.distance_lock:
+            return self.latest_distance
 
+    @staticmethod
     def check_distance():
         bites = AsciiStrategy.ser.read(4)
         return struct.unpack('f',bites)[0]
@@ -482,102 +519,107 @@ class AsciiStrategy(re.RenderStrategy):
         else:
             sys.stdout.write('\033[2J')
         
+        # Start background distance reading
+        self.start_distance_reading()
         
-        
-        while True:
-            cap = cv2.VideoCapture(current_state)
-            
-            if not cap.isOpened():
-                print(f"Error: Could not open video")
-                continue
-            
-            # Get terminal dimensions
-            if PLATFORM:
-                rows, cols = os.popen('stty size', 'r').read().split()
-            else:
-                cols, rows = os.get_terminal_size()
-            
-            # Get video properties
-            fps = cap.get(cv2.CAP_PROP_FPS) or 30
-            time_delta = 1./fps
-            
-            # Render video frame by frame with distance checking
-            video_finished = False
-            state_changed = False
-            
-            while cap.isOpened():
-                t0 = time.process_time()
+        try:
+            while True:
+                cap = cv2.VideoCapture(current_state)
                 
-                # Read and render frame
-                _ret, frame = cap.read()
-                if frame is None:
-                    video_finished = True
-                    break
-                
-                # Render the frame
+                if not cap.isOpened():
+                    print("Error: Could not open video")
+                    continue
+            
+                # Get terminal dimensions
                 if PLATFORM:
-                    sys.stdout.write('\u001b[0;0H')
+                    rows, cols = os.popen('stty size', 'r').read().split()
                 else:
-                    sys.stdout.write("\x1b[0;0H")
+                    cols, rows = os.get_terminal_size()
                 
-                resized_frame = self.resize_frame(frame, (cols, rows))
-                msg = self.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
-                sys.stdout.write(msg)
+                # Get video properties
+                fps = cap.get(cv2.CAP_PROP_FPS) or 30
+                time_delta = 1./fps
                 
-                # Check distance and determine new state
-                x = AsciiStrategy.check_distance()
-                new_state = current_state
+                # Render video frame by frame with distance checking
+                video_finished = False
+                state_changed = False
                 
-                # Define your distance ranges and corresponding states
-                if int(x) < 20:
-                    new_state = States.LAUGH.value
-                elif int(x) < 40:
-                    new_state = States.CURIOUS.value
-                elif int(x) < 60:
-                    new_state = States.ANNOYED.value
-                elif int(x) < 80:
-                    new_state = States.ANGRY.value
-                else:
-                    new_state = States.IDLE.value
-                
-                # If state changed, break to transition
-                if current_state != new_state:
-                    current_state = new_state
-                    state_changed = True
-                    break
-                
-                # Maintain frame rate
-                t1 = time.process_time()
-                delta = time_delta - (t1 - t0)
-                if delta > 0:
-                    time.sleep(delta)
-            
-            # Handle transition or loop
-            if state_changed:
-                # State changed - transition to new video
-                next_cap = cv2.VideoCapture(current_state)
-                if next_cap.isOpened():
-                    # Position current video near end for smooth transition
-                    current_frame = cap.get(cv2.CAP_PROP_POS_FRAMES)
-                    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                while cap.isOpened():
+                    t0 = time.process_time()
                     
-                    # Only do transition if we have enough frames left
-                    if total_frames - current_frame > self.transition_frames:
+                    # Read and render frame
+                    _ret, frame = cap.read()
+                    if frame is None:
+                        video_finished = True
+                        break
+                    
+                    # Render the frame
+                    if PLATFORM:
+                        sys.stdout.write('\u001b[0;0H')
+                    else:
+                        sys.stdout.write("\x1b[0;0H")
+                    
+                    resized_frame = self.resize_frame(frame, (cols, rows))
+                    msg = self.convert_frame_pixels_to_ascii(resized_frame, (cols, rows))
+                    sys.stdout.write(msg)
+                    
+                    # Get latest distance (non-blocking)
+                    x = self.get_latest_distance()
+                    new_state = current_state
+                
+                    # Define your distance ranges and corresponding states
+                    if int(x) < 20:
+                        new_state = States.LAUGH.value
+                    elif int(x) < 40:
+                        new_state = States.CURIOUS.value
+                    elif int(x) < 60:
+                        new_state = States.ANNOYED.value
+                    elif int(x) < 80:
+                        new_state = States.ANGRY.value
+                    else:
+                        new_state = States.IDLE.value
+                    
+                    # If state changed, break to transition
+                    if current_state != new_state:
+                        current_state = new_state
+                        state_changed = True
+                        break
+                    
+                    # Maintain frame rate
+                    t1 = time.process_time()
+                    delta = time_delta - (t1 - t0)
+                    if delta > 0:
+                        time.sleep(delta)
+                
+                # Handle transition or loop
+                if state_changed:
+                    # State changed - transition to new video
+                    next_cap = cv2.VideoCapture(current_state)
+                    if next_cap.isOpened():
+                        # Position current video near end for smooth transition
+                        current_frame = cap.get(cv2.CAP_PROP_POS_FRAMES)
+                        total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        
+                        # Only do transition if we have enough frames left
+                        if total_frames - current_frame > self.transition_frames:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 
+                                   current_frame + max(0, int(total_frames - current_frame - self.transition_frames)))
+                        
+                        self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
+                        next_cap.release()
+                elif video_finished:
+                    # Video finished naturally - loop it
+                    next_cap = cv2.VideoCapture(current_state)
+                    if next_cap.isOpened():
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 
-                               current_frame + max(0, int(total_frames - current_frame - self.transition_frames)))
-                    
-                    self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
-                    next_cap.release()
-            elif video_finished:
-                # Video finished naturally - loop it
-                next_cap = cv2.VideoCapture(current_state)
-                if next_cap.isOpened():
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, 
-                           int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - self.transition_frames))
-                    self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
-                    next_cap.release()
-            
-            cap.release()
+                               int(cap.get(cv2.CAP_PROP_FRAME_COUNT) - self.transition_frames))
+                        self.wipe_transition(cap, next_cap, (cols, rows), output, direction='top')
+                        next_cap.release()
+                
+                cap.release()
+        finally:
+            # Clean up: stop distance reading thread
+            self.stop_distance_reading()
         
 
     def build_progress(self, progress, total):
