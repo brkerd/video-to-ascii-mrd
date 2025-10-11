@@ -49,6 +49,12 @@ class AsciiStrategy(re.RenderStrategy):
         self.distance_thread = None
         self.reading_distance = False
         
+        # Add smoothing for sensor readings
+        self.distance_buffer = []  # Store recent readings
+        self.buffer_size = 10  # Number of readings to average
+        self.max_valid_distance = 700  # Disregard readings above this
+        self.smoothed_distance = 100.0  # The averaged distance
+        
     def start_distance_reading(self):
         """Start background thread for continuous distance reading"""
         self.reading_distance = True
@@ -68,8 +74,21 @@ class AsciiStrategy(re.RenderStrategy):
                 bites = AsciiStrategy.ser.read(4)
                 distance = struct.unpack('f', bites)[0]
                 
-                with self.distance_lock:
-                    self.latest_distance = distance
+                # Filter out invalid readings
+                if distance <= self.max_valid_distance and distance > 0:
+                    with self.distance_lock:
+                        # Add to buffer
+                        self.distance_buffer.append(distance)
+                        
+                        # Keep buffer at fixed size
+                        if len(self.distance_buffer) > self.buffer_size:
+                            self.distance_buffer.pop(0)
+                        
+                        # Calculate moving average
+                        if len(self.distance_buffer) > 0:
+                            self.smoothed_distance = sum(self.distance_buffer) / len(self.distance_buffer)
+                            self.latest_distance = self.smoothed_distance
+                        
             except Exception as e:
                 # Handle serial read errors gracefully
                 print(f"Distance read error: {e}")
